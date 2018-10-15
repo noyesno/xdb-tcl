@@ -1,0 +1,52 @@
+
+package require tcltest
+namespace import ::tcltest::*
+
+package require xdb-tcl
+
+package require sqlite3
+
+file delete test.db
+sqlite3 db test.db
+
+db eval {
+  CREATE TABLE t (name, value);
+
+  INSERT INTO t VALUES ('abc', 123);
+  INSERT INTO t VALUES ('def', 456);
+  INSERT INTO t VALUES ('hij', 789);
+}
+
+exec tclsh xdb-tcl.vfs/main.tcl listen 9999 >@ stdout 2>@1 &
+
+set xdb [xdb-tcl::connect 127.0.0.1 9999]
+
+$xdb -print
+
+test use "use" {
+  $xdb use test.db
+} "test.db"
+
+test query "query" {
+  $xdb query {
+    select * from t
+  }
+} "{abc 123} {def 456} {hij 789}"
+
+test query_bind "query -bind" {
+  $xdb query {
+    select * from t where name=:name
+  } -bind [list name "def"]
+} "{def 456}"
+
+test query_filter "query -filter" {
+  $xdb query {
+    select * from t where name=:name
+  } -bind [list name "def"] -filter {
+    incr row(value)
+  }
+} "{def 457}"
+
+# $xdb shutdown
+
+::tcltest::cleanupTests
