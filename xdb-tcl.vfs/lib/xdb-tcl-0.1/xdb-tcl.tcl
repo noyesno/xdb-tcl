@@ -1,27 +1,47 @@
 
-
-package require sqlite3
-
 package provide xdb-tcl 0.1
 
 set NS xdb-tcl
 
 namespace eval $NS {
-  variable clients ;# [dict create]
+  variable clients [dict create]
   # variable dbcmd   ; array set dbcmd ""
-  variable dbcache [dict create]
+
+  namespace eval client {
+    namespace path [namespace parent]
+  }
+
+  namespace eval server {
+    variable dbcache [dict create]
+
+    namespace path [namespace parent]
+
+    proc db_profile {sql ns} {
+      set ms [expr {$ns/1000000}]
+      debug "sql profile = $ms ms # $sql"
+    }
+  }
+
 
   proc debug {args} {
     # puts "debug: [join $args]"
   }
 
-  proc db_profile {sql ns} {
-    set ms [expr {$ns/1000000}]
-    debug "sql profile = $ms ms # $sql"
-  }
 }
 
-# TODO: proc ${NS}::open
+#----------------------------------------------------------------------#
+# entry                                                                #
+#----------------------------------------------------------------------#
+
+proc ${NS}::listen {port} {
+  package require sqlite3
+
+  set ns [namespace current]
+
+  set ssock [socket -server [list ${ns}::server::accept] $port]
+
+  debug "listen $port ..."
+}
 
 proc ${NS}::connect {host port} {
   set ns [namespace current]
@@ -29,17 +49,21 @@ proc ${NS}::connect {host port} {
   set sock [socket $host $port]
   fconfigure $sock -blocking 1 -encoding binary -translation binary
 
-  set client ${ns}::client-$sock
+  set client ${ns}::client@$sock
   interp alias {} $client {} ${ns}::client $sock
 
   # TODO: use dbcmd from server response
-  set dbcmd "${ns}::dbcmd@$sock"
-  interp alias {} $dbcmd {} ${ns}::dbcmd $sock $client
+  set dbcmd "${ns}::client::dbcmd@$sock"
+  interp alias {} $dbcmd {} ${ns}::client::dbcmd $sock $client
 
   $client set -print 0
 
   return $dbcmd
 }
+
+#----------------------------------------------------------------------#
+# common                                                               #
+#----------------------------------------------------------------------#
 
 proc ${NS}::filter_argv {argv argwant {argkeys ""}} {
     set kargv [list]
@@ -89,8 +113,19 @@ proc ${NS}::parse_argv {argv argwant {argkeys ""}} {
     return $kargs
 }
 
-proc ${NS}::dbcmd {sock client args} {
+#----------------------------------------------------------------------#
+# client                                                               #
+#----------------------------------------------------------------------#
 
+proc ${NS}::client::request {sock body} {
+  set size [string length $body]
+  puts $sock $size
+  puts $sock $body
+  flush $sock
+  return
+}
+
+proc ${NS}::client::dbcmd {sock client args} {
 
   set cmd_argv [lassign $args cmd]
 
@@ -133,25 +168,6 @@ proc ${NS}::dbcmd {sock client args} {
   return $cmd_result
 }
 
-proc ${NS}::request {sock body} {
-  set size [string length $body]
-  puts $sock $size
-  puts $sock $body
-  flush $sock
-  return
-}
-
-proc ${NS}::reply {client body} {
-  set sock [$client sock]
-
-  set size [string length $body]
-
-  puts $sock $size
-  puts $sock $body
-  flush $sock
-  return
-}
-
 proc ${NS}::client {sock act args} {
   variable clients
 
@@ -180,7 +196,23 @@ proc ${NS}::purge {} {
   return
 }
 
-proc ${NS}::db_open {dbfile} {
+#----------------------------------------------------------------------#
+# server                                                               #
+#----------------------------------------------------------------------#
+
+proc ${NS}::server::reply {client body} {
+  set sock [$client sock]
+
+  set size [string length $body]
+
+  puts $sock $size
+  puts $sock $body
+  flush $sock
+  return
+}
+
+
+proc ${NS}::server::db_open {dbfile} {
   variable dbcache
 
   set now [clock seconds]
@@ -206,10 +238,10 @@ proc ${NS}::db_open {dbfile} {
 }
 
 # TODO:
-proc ${NS}::db_read_cache {dbcmd args} {
+proc ${NS}::server::db_read_cache {dbcmd args} {
 }
 
-proc ${NS}::do_db_query {dbcmd args} {
+proc ${NS}::server::do_db_query {dbcmd args} {
   variable dbcache
 
   set dbfile [dict get $dbcache dbcmd  $dbcmd  dbfile]
@@ -237,7 +269,7 @@ proc ${NS}::do_db_query {dbcmd args} {
   return $result
 }
 
-proc ${NS}::db_query {dbcmd args} {
+proc ${NS}::server::db_query {dbcmd args} {
   variable dbcache
 
   lassign $args kargs(-sql) kargs(-bind) kargs(-filter)
@@ -279,11 +311,15 @@ proc ${NS}::db_query {dbcmd args} {
    return $result
 }
 
-proc ${NS}::format_query_result {as records} {
+proc ${NS}::client::format_query_result {as records} {
 
   set result $records
 
-  if {$as eq "" || $as eq "table"} {
+  if {$as eq ""} {
+    set as "list"
+  }
+
+  if {$as eq "table"} {
     return $result
   }
 
@@ -325,7 +361,7 @@ proc ${NS}::format_query_result {as records} {
   return $result
 }
 
-proc ${NS}::execute {client args} {
+proc ${NS}::server::execute {client args} {
 
   set sock [$client sock]
 
@@ -341,7 +377,7 @@ proc ${NS}::execute {client args} {
     $dbcmd profile ${ns}::db_profile ;# TODO: move to db_open
 
     $client set dbcmd $dbcmd
-    return [reply $client $dbcmd]
+    return [reply $client $dbfile]
   }
 
   if {$cmd eq "insert"} {
@@ -371,24 +407,15 @@ proc ${NS}::execute {client args} {
   return [reply $client $result]
 }
 
-
-
-proc ${NS}::listen {port} {
-  set ns [namespace current]
-
-  set ssock [socket -server [list ${ns}::accept] $port]
-
-  debug "listen $port ..."
-}
-
-proc ${NS}::accept {sock client_addr client_port} {
+proc ${NS}::server::accept {sock client_addr client_port} {
   debug "accept $client_addr:$client_port"
 
   fconfigure $sock -blocking 0 -encoding binary -translation binary
 
-  set ns [namespace current]
-  set client ${ns}::client-$sock
-  interp alias {} $client {} ${ns}::client $sock
+  set ns  [namespace current]
+  set pns [namespace parent]
+  set client ${pns}::client@$sock
+  interp alias {} $client {} ${pns}::client $sock
 
   $client set sock $sock
   fileevent $sock readable [list ${ns}::read_command $client]
@@ -403,7 +430,7 @@ proc ${NS}::forget {client} {
   close $sock
 }
 
-proc ${NS}::read_command {client} {
+proc ${NS}::server::read_command {client} {
   set sock [$client sock]
 
   set size [gets $sock]
