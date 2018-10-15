@@ -8,8 +8,44 @@ proc xdb-tcl::debug {args} {
   puts "debug: $datetime % [join $args]"
 }
 
-lassign $::argv port
 
-xdb-tcl::listen $port
+namespace eval main {}
 
-vwait forever
+proc main::listen {args} {
+  lassign $args port
+  xdb-tcl::listen $port
+  vwait forever
+}
+
+proc main::test {args} {
+  package require tcltest
+  ::tcltest::configure -verbose {pass}
+  # uplevel #0 { namespace import ::tcltest::* }
+
+  lassign $args tclfile
+
+  if [file isfile $tclfile] {
+    uplevel #0 source $tclfile
+  } elseif [file isdir $tclfile] {
+    ::tcltest::configure -testdir $tclfile
+    ::tcltest::runAllTests
+  }
+  exit
+}
+
+proc main::help {} {
+  puts "Usage:"
+  puts ""
+  puts "    [file tail $::argv0] listen \$port"
+  puts ""
+}
+
+set ::argv [lassign $::argv act]
+
+if {[namespace which main::$act] ne ""} {
+  main::$act {*}$::argv
+} else {
+  main::help
+}
+
+exit
