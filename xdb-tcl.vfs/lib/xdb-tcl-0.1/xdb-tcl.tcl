@@ -363,6 +363,10 @@ proc ${NS}::execute {client args} {
     set result [do_db_query $dbcmd {*}$cmd_argv]
   }
 
+  if {$cmd eq "apply"} {
+    set apply_argv [lassign $cmd_argv apply_args apply_body]
+    set result [::apply [list $apply_args $apply_body] {*}$apply_argv]
+  }
 
   return [reply $client $result]
 }
