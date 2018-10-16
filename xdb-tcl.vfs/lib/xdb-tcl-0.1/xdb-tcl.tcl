@@ -119,10 +119,35 @@ proc ${NS}::parse_argv {argv argwant {argkeys ""}} {
 
 proc ${NS}::client::request {sock body} {
   set size [string length $body]
-  puts $sock $size
+  puts $sock "\$$size"
   puts $sock $body
   flush $sock
   return
+}
+
+proc ${NS}::client::read_reply {sock} {
+  set reply_code ""
+  set reply_body ""
+
+  # *2\r\n
+  # +ok\r\n
+  # $N\r\n
+  # ...\r\n
+
+  # TODO: check eof
+  set line [gets $sock]
+  if {[string index $line 0] eq "*"} {
+    set line [gets $sock]
+    set reply_code [string range $line 1 end]
+
+    set line [gets $sock]
+    set size [string range $line 1 end]
+    set reply_body [read $sock $size]
+    gets $sock
+  }
+
+  debug "reply_result = $reply_code $reply_body"
+  return [list $reply_code $reply_body]
 }
 
 proc ${NS}::client::dbcmd {sock client args} {
@@ -150,12 +175,7 @@ proc ${NS}::client::dbcmd {sock client args} {
 
   request $sock [list $cmd {*}$req_argv]
 
-  # TODO: check eof
-  set size   [gets $sock]
-  set req_result [read $sock $size]
-  gets $sock
-
-  set cmd_result $req_result
+  lassign [read_reply $sock] cmd_code cmd_result
 
   if {$cmd eq "query"} {
     set req_kargs [parse_argv $cmd_argv {-as}]
@@ -200,12 +220,27 @@ proc ${NS}::purge {} {
 # server                                                               #
 #----------------------------------------------------------------------#
 
-proc ${NS}::server::reply {client body} {
+proc ${NS}::server::reply_result {client body} {
   set sock [$client sock]
 
   set size [string length $body]
 
-  puts $sock $size
+  puts $sock "*2"
+  puts $sock "+ok"
+  puts $sock "\$$size"
+  puts $sock $body
+  flush $sock
+  return
+}
+
+proc ${NS}::server::reply_error {client body} {
+  set sock [$client sock]
+
+  set size [string length $body]
+
+  puts $sock "*2"
+  puts $sock "+error"
+  puts $sock "\$$size"
   puts $sock $body
   flush $sock
   return
@@ -377,7 +412,7 @@ proc ${NS}::server::execute {client args} {
     $dbcmd profile ${ns}::db_profile ;# TODO: move to db_open
 
     $client set dbcmd $dbcmd
-    return [reply $client $dbfile]
+    return [reply_result $client $dbfile]
   }
 
   if {$cmd eq "insert"} {
@@ -404,7 +439,7 @@ proc ${NS}::server::execute {client args} {
     set result [::apply [list $apply_args $apply_body] {*}$apply_argv]
   }
 
-  return [reply $client $result]
+  return [reply_result $client $result]
 }
 
 proc ${NS}::server::accept {sock client_addr client_port} {
@@ -441,10 +476,28 @@ proc ${NS}::server::read_command {client} {
     }
   }
 
-  set data [read $sock $size]
-  gets $sock
-  debug "request = $size $data"
-  execute $client {*}$data
+  if {[string index $size 0] eq "$"} {
+    set size [string range $size 1 end]
+    set command [read $sock $size]
+    gets $sock
+  } elseif {[string index $size 0] eq "*"} {
+    set n [string range $size 1 end]
+    set command [list]
+    while {$n} {
+      incr n -1
+      gets $sock line
+      set size [string range $line 1 end]
+      set arg [read sock $size]
+      gets $sock
+      lappend command $arg
+    }
+  } else {
+    set command [read $sock $size]
+    gets $sock
+  }
+
+  debug "request = $size $command"
+  execute $client {*}$command
 }
 
 return
