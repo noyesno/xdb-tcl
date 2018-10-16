@@ -1,0 +1,31 @@
+
+package require tcltest
+namespace import ::tcltest::*
+
+package require xdb-tcl
+
+exec tclsh xdb-tcl.vfs/main.tcl listen 9999 >@ stdout 2>@1 &
+
+set xdb [xdb-tcl::connect 127.0.0.1 9999]
+
+$xdb -print
+
+test apply_expr "apply expr" {
+  $xdb apply {a b} { expr {$a+$b} } 3 4
+} 7
+
+test apply_file "apply file" -setup {
+  set fpath [makeFile "hello" test.txt]
+} -cleanup {
+  removeFile test.txt
+} -body {
+  $xdb apply {fpath} {
+    set fp [open $fpath]  
+    set line [gets $fp] 
+    close $fp
+    return $line
+  } $fpath
+} -result "hello"
+
+::tcltest::cleanupTests
+
