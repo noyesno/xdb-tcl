@@ -117,10 +117,12 @@ proc ${NS}::parse_argv {argv argwant {argkeys ""}} {
 # client                                                               #
 #----------------------------------------------------------------------#
 
-proc ${NS}::client::request {sock body} {
+proc ${NS}::client::send_command {sock body} {
+  set body [encoding convertto utf-8 $body]
+
   set size [string length $body]
-  puts $sock "\$$size"
-  puts $sock $body
+  puts -nonewline $sock "\$$size\r\n"
+  puts -nonewline $sock "$body\r\n"
   flush $sock
   return
 }
@@ -138,10 +140,10 @@ proc ${NS}::client::read_reply {sock} {
   set line [gets $sock]
   if {[string index $line 0] eq "*"} {
     set line [gets $sock]
-    set reply_code [string range $line 1 end]
+    set reply_code [string range $line 1 end-1]
 
     set line [gets $sock]
-    set size [string range $line 1 end]
+    set size [string range $line 1 end-1]
     set reply_body [read $sock $size]
     gets $sock
   }
@@ -173,7 +175,7 @@ proc ${NS}::client::dbcmd {sock client args} {
     set req_argv [filter_argv $cmd_argv {-filter -bind -sql} {-sql -body}]
   }
 
-  request $sock [list $cmd {*}$req_argv]
+  send_command $sock [list $cmd {*}$req_argv]
 
   lassign [read_reply $sock] cmd_code cmd_result
 
@@ -223,26 +225,53 @@ proc ${NS}::purge {} {
 proc ${NS}::server::reply_result {client body} {
   set sock [$client sock]
 
-  set size [string length $body]
+  switch -- [$client get protocol] {
+    "comm" {
+      set reply_id 0
+      puts $sock [list reply $reply_id [list return -code 0 $body]]
+      flush $sock
+    }
+    "redis" {
+      set body [encoding convertto utf-8 $body]
 
-  puts $sock "*2"
-  puts $sock "+ok"
-  puts $sock "\$$size"
-  puts $sock $body
-  flush $sock
+      set size [string length $body]
+      puts -nonewline $sock "*2\r\n"
+      puts -nonewline $sock "+ok\r\n"
+      puts -nonewline $sock "\$$size\r\n"
+      puts -nonewline $sock "$body\r\n"
+      flush $sock
+    }
+    default {
+      "not supported"
+    }
+  }
+
   return
 }
 
 proc ${NS}::server::reply_error {client body} {
   set sock [$client sock]
 
-  set size [string length $body]
+  switch -- [$client get protocol] {
+    "comm" {
+      set reply_id 0
+      puts $sock [list reply $reply_id [list return -code 1 $body]]
+      flush $sock
+    }
+    "redis" {
+      set body [encoding convertto utf-8 $body]
 
-  puts $sock "*2"
-  puts $sock "+error"
-  puts $sock "\$$size"
-  puts $sock $body
-  flush $sock
+      set size [string length $body]
+      puts -nonewline $sock "*2\r\n"
+      puts -nonewline $sock "+error\r\n"
+      puts -nonewline $sock "\$$size\r\n"
+      puts -nonewline $sock "$body\r\n"
+      flush $sock
+    }
+    default {
+      "not supported"
+    }
+  }
   return
 }
 
@@ -404,6 +433,10 @@ proc ${NS}::server::execute {client args} {
 
   set cmd_argv [lassign $args cmd]
 
+  if {$cmd eq "ping"} {
+    return [reply_result $client "pone $cmd_argv"]
+  }
+
   if {$cmd eq "use"} {
     set dbfile [lindex $args 1]
 
@@ -453,7 +486,8 @@ proc ${NS}::server::accept {sock client_addr client_port} {
   interp alias {} $client {} ${pns}::client $sock
 
   $client set sock $sock
-  fileevent $sock readable [list ${ns}::read_command $client]
+  $client set ncmd 0
+  fileevent $sock readable [list ${ns}::read_command $sock $client]
 }
 
 # TODO: or use name `drop`
@@ -465,39 +499,97 @@ proc ${NS}::forget {client} {
   close $sock
 }
 
-proc ${NS}::server::read_command {client} {
-  set sock [$client sock]
+proc ${NS}::server::read_comm {sock client} {
+  variable sockbuf
 
-  set size [gets $sock]
-  if {$size eq ""} {
-    if {[eof $sock]} {
-      forget $client
+  while {[gets $sock line]>=0} {
+    append sockbuf $line
+
+    if {[string is list -strict $sockbuf]} {
+      lassign $sockbuf send id command
+      # TODO: assert $send in "send async command"
+      set sockbuf ""
+      execute $client {*}$command
       return
+    } else {
+      append sockbuff "\n"
     }
   }
 
-  if {[string index $size 0] eq "$"} {
-    set size [string range $size 1 end]
+  # check eof
+  if {[eof $sock]} {
+    forget $client
+    return
+  }
+}
+
+proc ${NS}::server::read_redis {sock client args} {
+
+  if {[llength $args]==0} {
+    set line [gets $sock]
+  } else {
+    set line [lindex $args 0]
+  }
+
+  if {[string index $line 0] eq "$"} {
+    set size [string range $line 1 end]
     set command [read $sock $size]
     gets $sock
-  } elseif {[string index $size 0] eq "*"} {
-    set n [string range $size 1 end]
+  } elseif {[string index $line 0] eq "*"} {
+    set n [string range $line 1 end]
     set command [list]
     while {$n} {
       incr n -1
       gets $sock line
       set size [string range $line 1 end]
-      set arg [read sock $size]
+      set arg [read $sock $size]
       gets $sock
       lappend command $arg
     }
-  } else {
+  } elseif {$line ne ""} {
+    # TODO
+    set size $line
     set command [read $sock $size]
     gets $sock
   }
 
+  # check eof
+  if {[eof $sock]} {
+    forget $client
+    return
+  }
+
   debug "request = $size $command"
   execute $client {*}$command
+}
+
+proc ${NS}::server::read_command {sock client} {
+  set ncmd [$client get ncmd]
+
+    set line [gets $sock]
+    set ntoks 0
+    puts $line
+    catch { set ntoks [llength $line] }
+    if { $ntoks==2
+      && [string is integer -strict [lindex $line 0 0]]
+      && [string is integer -strict [lindex $line 1]]
+       } {
+      $client set protocol "comm"
+      fconfigure $sock -encoding utf-8 -translation lf
+      puts $sock "{ver 3}"
+      set ns [namespace current]
+      fileevent $sock readable [list ${ns}::read_comm $sock $client]
+      return
+    } elseif {[string index $line 0] eq "*" || [string index $line 0] eq "$"} {
+      $client set protocol "redis"
+      set ns [namespace current]
+      fconfigure $sock -translation binary -encoding binary
+      fileevent $sock readable [list ${ns}::read_redis $sock $client]
+      read_redis $sock $client $line
+      return
+    }
+
+  return
 }
 
 return
