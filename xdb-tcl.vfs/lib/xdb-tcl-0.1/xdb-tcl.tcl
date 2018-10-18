@@ -233,12 +233,21 @@ proc ${NS}::server::reply_result {client body} {
     }
     "redis" {
       set body [encoding convertto utf-8 $body]
-
       set size [string length $body]
+
       puts -nonewline $sock "*2\r\n"
       puts -nonewline $sock "+ok\r\n"
       puts -nonewline $sock "\$$size\r\n"
       puts -nonewline $sock "$body\r\n"
+      flush $sock
+    }
+    "telnet" {
+      set body [encoding convertto utf-8 $body]
+      set size [string length $body]
+
+      puts $sock "+OK $size"
+      puts $sock $body
+      puts $sock "."
       flush $sock
     }
     default {
@@ -266,6 +275,15 @@ proc ${NS}::server::reply_error {client body} {
       puts -nonewline $sock "+error\r\n"
       puts -nonewline $sock "\$$size\r\n"
       puts -nonewline $sock "$body\r\n"
+      flush $sock
+    }
+    "telnet" {
+      set body [encoding convertto utf-8 $body]
+      set size [string length $body]
+
+      puts $sock "+ERR $size"
+      puts $sock $body
+      puts $sock "."
       flush $sock
     }
     default {
@@ -499,6 +517,28 @@ proc ${NS}::forget {client} {
   close $sock
 }
 
+proc ${NS}::server::read_telnet {sock client args} {
+  if {[llength $args]==0} {
+    set line [gets $sock]
+  } else {
+    set line [lindex $args 0]
+  }
+
+  set command $line
+
+  if {$command ne ""} {
+    execute $client {*}$command
+  }
+
+  # check eof
+  if {[eof $sock]} {
+    forget $client
+    return
+  }
+
+  return
+}
+
 proc ${NS}::server::read_comm {sock client} {
   variable sockbuf
 
@@ -567,9 +607,10 @@ proc ${NS}::server::read_command {sock client} {
   set ncmd [$client get ncmd]
 
     set line [gets $sock]
+
     set ntoks 0
-    puts $line
     catch { set ntoks [llength $line] }
+
     if { $ntoks==2
       && [string is integer -strict [lindex $line 0 0]]
       && [string is integer -strict [lindex $line 1]]
@@ -587,6 +628,15 @@ proc ${NS}::server::read_command {sock client} {
       fileevent $sock readable [list ${ns}::read_redis $sock $client]
       read_redis $sock $client $line
       return
+    } elseif {$line ne ""} {
+      $client set protocol "telnet"
+      set ns [namespace current]
+      fconfigure $sock -translation {auto binary} -encoding utf-8
+      fileevent $sock readable [list ${ns}::read_telnet $sock $client]
+      read_telnet $sock $client $line
+      return
+    } else {
+      # TODO: not expected
     }
 
   return
