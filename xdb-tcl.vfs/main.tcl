@@ -1,6 +1,10 @@
-set KIT_ROOT [file dir [info script]]
+# vim:set syntax=tcl sw=2: #
+
+set ::KIT_ROOT [file dir [info script]]
+
 lappend auto_path [file join $KIT_ROOT lib]
 
+package require socket
 package require xdb-tcl
 
 proc xdb-tcl::debug {args} {
@@ -11,9 +15,20 @@ proc xdb-tcl::debug {args} {
 
 namespace eval main {}
 
-proc main::listen {args} {
-  lassign $args port
-  xdb-tcl::listen $port
+#======================================================================#
+# main                                                                 #
+#======================================================================#
+
+proc main::listen {port} {
+  socket::listen $port xdb-tcl::server::accept {
+    package require xdb-tcl
+
+    proc xdb-tcl::debug {args} {
+      set datetime [clock format [clock seconds]]
+      puts "debug: $datetime % [join $args]"
+    }
+  }
+
   vwait forever
 }
 
