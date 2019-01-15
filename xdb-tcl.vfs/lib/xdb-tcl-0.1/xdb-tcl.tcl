@@ -253,6 +253,7 @@ proc ${NS}::server::reply_result {client body} {
     }
   }
 
+  watchdog start $client
   return
 }
 
@@ -525,7 +526,13 @@ proc ${NS}::server::accept {sock client_addr client_port {cleanup ""}} {
 
   $client set sock $sock
   $client set ncmd 0
+
+  set timeout 10  ;# 10 seconds
+  $client set watchdog [list $timeout ${ns}::forget $client]
+  watchdog start $client
+
   fileevent $sock readable [list ${ns}::read_command $sock $client]
+
 
   if {$cleanup ne ""} {
     vwait ${ns}::forever
@@ -535,8 +542,28 @@ proc ${NS}::server::accept {sock client_addr client_port {cleanup ""}} {
   }
 }
 
+proc ${NS}::server::watchdog {act client} {
+
+  set timer [$client get watchdog]
+
+  switch -- $act {
+    "start" {
+      debug "watch dog start $timer"
+      ::after {*}[$client get watchdog]
+    }
+    "stop" {
+      debug "watch dog stop $timer"
+      ::after cancel [lindex [$client get watchdog] 1]
+    }
+    "feed" {
+      ::after cancel [lindex [$client get watchdog] 1]
+      ::after {*}[$client get watchdog]
+    }
+  }
+}
+
 # TODO: or use name `drop`
-proc ${NS}::forget {client} {
+proc ${NS}::server::forget {client} {
   set sock [$client sock]
   debug "forget client $client"
   $client close
@@ -656,6 +683,8 @@ proc ${NS}::server::read_sized {sock client args} {
 
 proc ${NS}::server::read_command {sock client} {
   set ncmd [$client get ncmd]
+
+    watchdog stop $client
 
     set line [gets $sock]
 
