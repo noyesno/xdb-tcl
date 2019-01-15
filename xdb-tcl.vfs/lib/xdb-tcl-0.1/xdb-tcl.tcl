@@ -1,4 +1,6 @@
 
+package require sqlite3
+
 package provide xdb-tcl 0.1
 
 set NS xdb-tcl
@@ -32,16 +34,6 @@ namespace eval $NS {
 #----------------------------------------------------------------------#
 # entry                                                                #
 #----------------------------------------------------------------------#
-
-proc ${NS}::listen {port} {
-  package require sqlite3
-
-  set ns [namespace current]
-
-  set ssock [socket -server [list ${ns}::server::accept] $port]
-
-  debug "listen $port ..."
-}
 
 proc ${NS}::connect {host port} {
   set ns [namespace current]
@@ -241,6 +233,12 @@ proc ${NS}::server::reply_result {client body} {
       puts -nonewline $sock "$body\r\n"
       flush $sock
     }
+    "sized" {
+      set size [string length $body]
+      puts $sock $size
+      puts $sock $body
+      flush $sock
+    }
     "telnet" {
       set body [encoding convertto utf-8 $body]
       set size [string length $body]
@@ -323,7 +321,7 @@ proc ${NS}::server::db_open {dbfile} {
 proc ${NS}::server::db_read_cache {dbcmd args} {
 }
 
-proc ${NS}::server::do_db_query {dbcmd args} {
+proc ${NS}::server::do_db_query {dbcmd sql args} {
   variable dbcache
 
   set dbfile [dict get $dbcache dbcmd  $dbcmd  dbfile]
@@ -334,7 +332,19 @@ proc ${NS}::server::do_db_query {dbcmd args} {
     dict unset dbcache query $dbfile
   }
 
-  array set kargs [parse_argv $args {-sql -bind -filter}]
+  # command = -sql -var -filter -bind
+  #         | -sql -bind
+
+  array set kargs {
+    -sql    ""
+    -bind   ""
+    -filter ""
+    -each   "row"
+  }
+  set kargs(-sql) $sql
+  array set kargs $args
+
+
 
   set cachekey [list $kargs(-sql) $kargs(-bind) $kargs(-filter)]
 
@@ -344,49 +354,48 @@ proc ${NS}::server::do_db_query {dbcmd args} {
     return $result
   }
 
-  set result [db_query $dbcmd $kargs(-sql) $kargs(-bind) $kargs(-filter)]
+  set result [db_query $dbcmd $kargs(-sql) {*}[array get kargs]]
 
   dict set dbcache query $dbfile $cachekey $result
 
   return $result
 }
 
-proc ${NS}::server::db_query {dbcmd args} {
+proc ${NS}::server::db_query {dbcmd sql args} {
   variable dbcache
+  upvar kargs kargs
 
-  lassign $args kargs(-sql) kargs(-bind) kargs(-filter)
+  debug "db_query [array get kargs]"
 
    set result [list]
    set header [list]
    dict with kargs(-bind) {
      set nrow 0
-     $dbcmd eval $kargs(-sql) row {
-       switch -- [catch $kargs(-filter) record] {
-         0 { # ok
-           incr nrow
-           if {$nrow==1} {
-             set header $row(*)
-             lappend result $header
-           }
-           set record [list]
-           foreach col $header {
-             lappend record [set row($col)]
-           }
-           lappend result $record
-         }
-         1 { # error
-           return -code error $record
-         }
-         2 { # return
-           lappend result $record
-         }
-         3 { # break
-           break
-         }
-         4 { # continue
-           continue
-         }
+     $dbcmd eval $sql row {
+       if {$nrow==0} {
+         set columns $row(*)
+         unset row(*)
+         incr nrow
        }
+
+       try {
+         set record [::apply [list {} "upvar row $kargs(-each) ; $kargs(-filter)"] ]
+
+         # if {$nrow==1} {
+         #   set header $columns
+         #   lappend result $header
+         # }
+
+         lappend result $record
+       } on continue {} {
+         continue
+       } on break {} {
+         break
+       } on error err {
+         debug "Error: $err"
+         return -code error $err
+       }
+
      }
    }
 
@@ -466,34 +475,45 @@ proc ${NS}::server::execute {client args} {
     return [reply_result $client $dbfile]
   }
 
-  if {$cmd eq "insert"} {
-    # TODO:
-  }
-  if {$cmd eq "select"} {
-    # TODO:
-  }
-  if {$cmd eq "delete"} {
-    # TODO:
-  }
+  switch -- $cmd {
+    "insert" {
+      # TODO:
+    }
+    "select" {
+      # TODO:
+    }
+    "delete" {
+      # TODO:
+    }
 
-  if {$cmd eq "eval"} {
-    # do tcl eval
-  }
+    "eval" {
+      # do tcl eval
+    }
 
-  if {$cmd eq "query"} {
-    set dbcmd [$client get dbcmd]
-    set result [do_db_query $dbcmd {*}$cmd_argv]
-  }
+    "query" {
+      set dbcmd [$client get dbcmd]
+      set result [do_db_query $dbcmd {*}$cmd_argv]
+    }
 
-  if {$cmd eq "apply"} {
-    set apply_argv [lassign $cmd_argv apply_args apply_body]
-    set result [::apply [list $apply_args $apply_body] {*}$apply_argv]
+    "apply" {
+      set apply_argv [lassign $cmd_argv apply_args apply_body]
+      set result [::apply [list $apply_args $apply_body] {*}$apply_argv]
+    }
   }
 
   return [reply_result $client $result]
 }
 
-proc ${NS}::server::accept {sock client_addr client_port} {
+
+proc ${NS}::server::listen {port} {
+  set ns [namespace current]
+
+  set ssock [socket -server [list ${ns}::server::accept] $port]
+
+  debug "listen $port ..."
+}
+
+proc ${NS}::server::accept {sock client_addr client_port {cleanup ""}} {
   debug "accept $client_addr:$client_port"
 
   fconfigure $sock -blocking 0 -encoding binary -translation binary
@@ -506,6 +526,13 @@ proc ${NS}::server::accept {sock client_addr client_port} {
   $client set sock $sock
   $client set ncmd 0
   fileevent $sock readable [list ${ns}::read_command $sock $client]
+
+  if {$cleanup ne ""} {
+    vwait ${ns}::forever
+
+    debug "cleanup $cleanup"
+    uplevel 1 $cleanup
+  }
 }
 
 # TODO: or use name `drop`
@@ -515,6 +542,9 @@ proc ${NS}::forget {client} {
   $client close
   interp alias {} $client {}
   close $sock
+
+  set ns [namespace current]
+  set ${ns}::forever 0
 }
 
 proc ${NS}::server::read_telnet {sock client args} {
@@ -603,6 +633,27 @@ proc ${NS}::server::read_redis {sock client args} {
   execute $client {*}$command
 }
 
+proc ${NS}::server::read_sized {sock client args} {
+  if {[llength $args]==0} {
+    set size [gets $sock]
+  } else {
+    set size [lindex $args 0]
+  }
+
+  if {$size eq ""} {
+    if {[eof $sock]} {
+      forget $client
+      return
+    }
+  }
+
+  debug "size = $size"
+  set command [read $sock $size]
+  gets $sock
+  debug $size $command
+  execute $client {*}$command
+}
+
 proc ${NS}::server::read_command {sock client} {
   set ncmd [$client get ncmd]
 
@@ -628,6 +679,12 @@ proc ${NS}::server::read_command {sock client} {
       fileevent $sock readable [list ${ns}::read_redis $sock $client]
       read_redis $sock $client $line
       return
+    } elseif {[string is integer -strict $line]} {
+      $client set protocol "sized"
+      set ns [namespace current]
+      fconfigure $sock -translation lf -encoding utf-8
+      fileevent $sock readable [list ${ns}::read_sized $sock $client]
+      read_sized $sock $client $line
     } elseif {$line ne ""} {
       $client set protocol "telnet"
       set ns [namespace current]
