@@ -5,10 +5,17 @@ package require Thread
 package provide socket 0.1
 
 namespace eval socket {
+
+  proc thread_error {thread_id errorInfo} {
+    puts "Thread Error $thread_id: $errorInfo"
+  }
+
   proc listen {port accept init} {
     set ssock [socket -server [list [namespace which accept] $accept $init] $port]
 
     puts "listen $port ..."
+
+    thread::errorproc [namespace which thread_error]
   }
 
   proc accept {accept init sock client_addr client_port} {
@@ -23,7 +30,13 @@ namespace eval socket {
     thread::send -async $tid [list set ::auto_path $::auto_path]
     thread::send -async $tid $init
 
-    set cleanup "thread::exit"
+    set cleanup {
+      try {
+        puts "debug: thread::release = [thread::release]"
+      } on error err {
+        puts "thread exit error $err"
+      }
+    }
 
     thread::send -async $tid [list $accept $sock $client_addr $client_port $cleanup] ::${tid}@result
 

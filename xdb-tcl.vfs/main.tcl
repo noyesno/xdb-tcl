@@ -9,7 +9,7 @@ package require xdb-tcl
 
 proc xdb-tcl::debug {args} {
   set datetime [clock format [clock seconds]]
-  puts "debug: $datetime % [join $args]"
+  puts "debug: $datetime [::thread::id] % [join $args]"
 }
 
 
@@ -22,10 +22,11 @@ namespace eval main {}
 proc main::listen {port} {
   socket::listen $port xdb-tcl::server::accept {
     package require xdb-tcl
+    package require Thread
 
     proc xdb-tcl::debug {args} {
-      set datetime [clock format [clock seconds]]
-      puts "debug: $datetime % [join $args]"
+      set datetime [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]
+      puts "debug: $datetime [::thread::id] % [join $args]"
     }
   }
 
@@ -47,6 +48,13 @@ proc main::test {args} {
     ::tcltest::runAllTests
   }
   exit
+}
+
+proc main::runtime-info {args} {
+  puts "loaded = [info loaded]"
+  puts "tsv::handlers = [tsv::handlers]" 
+  package require Thread
+
 }
 
 proc main::help {} {

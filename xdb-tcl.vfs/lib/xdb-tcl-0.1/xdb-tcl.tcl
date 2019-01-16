@@ -39,10 +39,11 @@ proc ${NS}::connect {host port} {
   set ns [namespace current]
 
   set sock [socket $host $port]
-  fconfigure $sock -blocking 1 -encoding binary -translation binary
+  fconfigure $sock -blocking 1 -encoding utf-8 -translation lf
 
   set client ${ns}::client@$sock
-  interp alias {} $client {} ${ns}::client $sock
+  set token [interp alias {} $client {} ${ns}::client $sock]
+  debug "alias token = $token"
 
   # TODO: use dbcmd from server response
   set dbcmd "${ns}::client::dbcmd@$sock"
@@ -217,7 +218,11 @@ proc ${NS}::purge {} {
 proc ${NS}::server::reply_result {client body} {
   set sock [$client sock]
 
-  switch -- [$client get protocol] {
+  set protocol [$client get protocol]
+  debug "reply result ($protocol) [string length $body]"
+  # debug "$body"
+
+  switch -- $protocol {
     "comm" {
       set reply_id 0
       puts $sock [list reply $reply_id [list return -code 0 $body]]
@@ -234,6 +239,7 @@ proc ${NS}::server::reply_result {client body} {
       flush $sock
     }
     "sized" {
+      # set body [encoding convertto utf-8 $body]
       set size [string length $body]
       puts $sock $size
       puts $sock $body
@@ -322,6 +328,37 @@ proc ${NS}::server::db_open {dbfile} {
 proc ${NS}::server::db_read_cache {dbcmd args} {
 }
 
+proc ${NS}::server::cache {act pool args} {
+  switch -- $act {
+    "get" {
+      lassign $args key varname
+      upvar $varname value
+      set value ""
+      set found [::tsv::get $pool $key value]
+      if {!$found} {
+        return $found
+      }
+
+      set value [lindex $value 0]
+      set mtime [lindex $value 1]
+      set db_mtime 0
+      catch {
+        set db_mtime [file mtime $pool]
+      }
+      if {$db_mtime<=0 || $db_mtime > $mtime} {
+        set found 0
+        set value ""
+      }
+      return $found
+    }
+    "set" {
+      lassign $args key value
+      set now [clock seconds]
+      ::tsv::set $pool $key [list $value $now]
+    }
+  }
+}
+
 proc ${NS}::server::do_db_query {dbcmd sql args} {
   variable dbcache
 
@@ -349,15 +386,22 @@ proc ${NS}::server::do_db_query {dbcmd sql args} {
 
   set cachekey [list $kargs(-sql) $kargs(-bind) $kargs(-filter)]
 
-  if {[dict exist $dbcache query $dbfile $cachekey]} {
+  if {0 && [dict exist $dbcache query $dbfile $cachekey]} {
     set result [dict get $dbcache query $dbfile $cachekey]
     debug "query result from cache"
     return $result
   }
 
-  set result [db_query $dbcmd $kargs(-sql) {*}[array get kargs]]
+  if [cache get $dbfile $cachekey result] {
+    debug "query result from cache"
+    return $result
+  } else {
+    set result [db_query $dbcmd $kargs(-sql) {*}[array get kargs]]
 
-  dict set dbcache query $dbfile $cachekey $result
+    # debug "update query cache = $result"
+    # dict set dbcache query $dbfile $cachekey $result
+    cache set $dbfile $cachekey $result
+  }
 
   return $result
 }
@@ -372,31 +416,40 @@ proc ${NS}::server::db_query {dbcmd sql args} {
    set header [list]
    dict with kargs(-bind) {
      set nrow 0
-     $dbcmd eval $sql row {
-       if {$nrow==0} {
-         set columns $row(*)
-         unset row(*)
-         incr nrow
+     if {$kargs(-filter) eq ""} {
+       set result [$dbcmd eval $sql]
+     } else {
+       $dbcmd eval $sql row {
+	 if {$nrow==0} {
+	   set columns $row(*)
+	   unset row(*)
+	   incr nrow
+	 }
+
+	 try {
+
+	   if {$kargs(-filter) ne ""} {
+	     set record [::apply [list {} "upvar row $kargs(-each) ; $kargs(-filter)"] ]
+	   } else {
+	     set record [array get row]
+	   }
+
+	   # if {$nrow==1} {
+	   #   set header $columns
+	   #   lappend result $header
+	   # }
+
+	   lappend result $record
+	 } on continue {} {
+	   continue
+	 } on break {} {
+	   break
+	 } on error err {
+	   debug "Error: $err"
+	   return -code error $err
+	 }
+
        }
-
-       try {
-         set record [::apply [list {} "upvar row $kargs(-each) ; $kargs(-filter)"] ]
-
-         # if {$nrow==1} {
-         #   set header $columns
-         #   lappend result $header
-         # }
-
-         lappend result $record
-       } on continue {} {
-         continue
-       } on break {} {
-         break
-       } on error err {
-         debug "Error: $err"
-         return -code error $err
-       }
-
      }
    }
 
@@ -454,6 +507,7 @@ proc ${NS}::client::format_query_result {as records} {
 }
 
 proc ${NS}::server::execute {client args} {
+  watchdog stop $client
 
   set sock [$client sock]
 
@@ -517,7 +571,7 @@ proc ${NS}::server::listen {port} {
 proc ${NS}::server::accept {sock client_addr client_port {cleanup ""}} {
   debug "accept $client_addr:$client_port"
 
-  fconfigure $sock -blocking 0 -encoding binary -translation binary
+  fconfigure $sock -blocking 0 -encoding utf-8 -translation lf
 
   set ns  [namespace current]
   set pns [namespace parent]
@@ -537,7 +591,6 @@ proc ${NS}::server::accept {sock client_addr client_port {cleanup ""}} {
   if {$cleanup ne ""} {
     vwait ${ns}::forever
 
-    debug "cleanup $cleanup"
     uplevel 1 $cleanup
   }
 }
@@ -549,6 +602,7 @@ proc ${NS}::server::watchdog {act client} {
   switch -- $act {
     "start" {
       debug "watch dog start $timer"
+      ::after cancel [lindex [$client get watchdog] 1]
       ::after {*}[$client get watchdog]
     }
     "stop" {
@@ -564,11 +618,19 @@ proc ${NS}::server::watchdog {act client} {
 
 # TODO: or use name `drop`
 proc ${NS}::server::forget {client} {
+  watchdog stop $client
+
   set sock [$client sock]
   debug "forget client $client"
-  $client close
-  interp alias {} $client {}
-  close $sock
+  catch {
+    $client close
+  }
+
+  interp alias {} $client {}          ;# delete the alias
+
+  catch {
+    close $sock
+  }
 
   set ns [namespace current]
   set ${ns}::forever 0
@@ -629,18 +691,20 @@ proc ${NS}::server::read_redis {sock client args} {
   }
 
   if {[string index $line 0] eq "$"} {
-    set size [string range $line 1 end]
+    set size [string range $line 1 end-1]
     set command [read $sock $size]
-    gets $sock
+    read $sock 2 ;# discard "\r\n"
+    # set command [encoding convertfrom utf-8 $command]
   } elseif {[string index $line 0] eq "*"} {
-    set n [string range $line 1 end]
+    set n [string range $line 1 end-1]
     set command [list]
     while {$n} {
       incr n -1
       gets $sock line
-      set size [string range $line 1 end]
+      set size [string range $line 1 end-1]
       set arg [read $sock $size]
-      gets $sock
+      read $sock 2 ;# discard "\r\n"
+      # set arg [encoding convertfrom utf-8 $arg]
       lappend command $arg
     }
   } elseif {$line ne ""} {
@@ -661,6 +725,7 @@ proc ${NS}::server::read_redis {sock client args} {
 }
 
 proc ${NS}::server::read_sized {sock client args} {
+
   if {[llength $args]==0} {
     set size [gets $sock]
   } else {
@@ -669,9 +734,12 @@ proc ${NS}::server::read_sized {sock client args} {
 
   if {$size eq ""} {
     if {[eof $sock]} {
+      debug "see of"
       forget $client
       return
     }
+    debug "see empty size"
+    return
   }
 
   debug "size = $size"
@@ -704,6 +772,10 @@ proc ${NS}::server::read_command {sock client} {
     } elseif {[string index $line 0] eq "*" || [string index $line 0] eq "$"} {
       $client set protocol "redis"
       set ns [namespace current]
+      # XXX: Redis use "\r\n" as newline.
+      #      Redis use byte count, -translation should be disabled.
+      #      Redis itself use a binary encoding.
+      #      In this package, `encoding convertto utf-8` is used before reply.
       fconfigure $sock -translation binary -encoding binary
       fileevent $sock readable [list ${ns}::read_redis $sock $client]
       read_redis $sock $client $line
@@ -711,13 +783,18 @@ proc ${NS}::server::read_command {sock client} {
     } elseif {[string is integer -strict $line]} {
       $client set protocol "sized"
       set ns [namespace current]
-      fconfigure $sock -translation lf -encoding utf-8
+      # XXX: "sized" use "\n" as new line. Use char count as mark.
+      #      Encoding can be specified as utf-8. No conversion is needed for input and output.
+      #      Use "auto" for input to handle the case of "\r\n"
+      fconfigure $sock -encoding utf-8 -translation {auto lf}
       fileevent $sock readable [list ${ns}::read_sized $sock $client]
       read_sized $sock $client $line
     } elseif {$line ne ""} {
       $client set protocol "telnet"
       set ns [namespace current]
-      fconfigure $sock -translation {auto binary} -encoding utf-8
+      # XXX: For telnet, convert char encoding to/from utf-8 for terminal display.
+      #      Only support single line command.
+      fconfigure $sock -translation {auto lf} -encoding utf-8
       fileevent $sock readable [list ${ns}::read_telnet $sock $client]
       read_telnet $sock $client $line
       return
