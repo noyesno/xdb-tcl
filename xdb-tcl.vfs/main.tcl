@@ -20,10 +20,25 @@ namespace eval main {}
 #======================================================================#
 
 proc main::listen {port} {
-  socket::listen $port xdb-tcl::server::accept {
+  socket::listen $port xdb-tcl::server::accept -thread {
     package require xdb-tcl
     package require Thread
 
+    proc xdb-tcl::debug {args} {
+      set datetime [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]
+      puts "debug: $datetime [::thread::id] % [join $args]"
+    }
+  }
+
+  vwait forever
+}
+
+proc main::listen-tpool {port} {
+  socket::listen $port xdb-tcl::server::accept -tpool {
+    package require xdb-tcl
+    package require Thread
+
+    puts "init tpool"
     proc xdb-tcl::debug {args} {
       set datetime [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]
       puts "debug: $datetime [::thread::id] % [join $args]"

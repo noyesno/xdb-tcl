@@ -155,10 +155,13 @@ proc ${NS}::client::dbcmd {sock client args} {
   }
 
   if {$cmd eq "close"} {
+    catch {
+      debug "close $sock"
+      ::close $sock
+    }
     set ns [namespace current]
-    set dbcmd "${ns}::dbcmd-$sock"
+    set dbcmd "${ns}::dbcmd@$sock"
     interp alias {} $dbcmd {}
-    close $sock
     return
   }
 
@@ -198,6 +201,11 @@ proc ${NS}::client {sock act args} {
     }
     "close" -
     "unset" {
+      catch {
+        ::close $sock
+      }
+      set self [dict get $clients $sock self]
+      interp alias {} $self {}  ;# Or use `rename $self ""`
       return [dict unset clients $sock]
     }
     default {
@@ -578,18 +586,20 @@ proc ${NS}::server::accept {sock client_addr client_port {cleanup ""}} {
   set client ${pns}::client@$sock
   interp alias {} $client {} ${pns}::client $sock
 
+  $client set self $client
   $client set sock $sock
   $client set ncmd 0
 
-  set timeout 10  ;# 10 seconds
-  $client set watchdog [list $timeout ${ns}::forget $client]
+  set timeout [expr 1000*10]  ;# 10 seconds
+  set watchdog [list $timeout [list ${ns}::forget $client "watchdog"]]
+  $client set watchdog $watchdog
   watchdog start $client
 
   fileevent $sock readable [list ${ns}::read_command $sock $client]
 
-
   if {$cleanup ne ""} {
     vwait ${ns}::forever
+    debug "vwait ${ns}::forever = [set ${ns}::forever]"
 
     uplevel 1 $cleanup
   }
@@ -597,39 +607,39 @@ proc ${NS}::server::accept {sock client_addr client_port {cleanup ""}} {
 
 proc ${NS}::server::watchdog {act client} {
 
-  set timer [$client get watchdog]
+  set watchdog [$client get watchdog] 
+  lassign $watchdog time command
 
   switch -- $act {
     "start" {
-      debug "watch dog start $timer"
-      ::after cancel [lindex [$client get watchdog] 1]
-      ::after {*}[$client get watchdog]
+      debug "watch dog start $watchdog"
+      ::after cancel $command
+      ::after $time $command
     }
     "stop" {
-      debug "watch dog stop $timer"
-      ::after cancel [lindex [$client get watchdog] 1]
+      debug "watch dog stop $watchdog"
+      ::after cancel $command
     }
     "feed" {
-      ::after cancel [lindex [$client get watchdog] 1]
-      ::after {*}[$client get watchdog]
+      ::after cancel $command
+      ::after $time $command
     }
   }
 }
 
 # TODO: or use name `drop`
-proc ${NS}::server::forget {client} {
-  watchdog stop $client
-
-  set sock [$client sock]
-  debug "forget client $client"
-  catch {
-    $client close
+proc ${NS}::server::forget {client {reason ""}} {
+  try {
+    watchdog stop $client
+  } on error err {
+    debug "Error: watchdog stop $client # $err"
   }
 
-  interp alias {} $client {}          ;# delete the alias
-
-  catch {
-    close $sock
+  try {
+    debug "forget client $client due to $reason"
+    $client close
+  } on error err {
+    debug "Error: $client close # $err"
   }
 
   set ns [namespace current]
@@ -651,7 +661,7 @@ proc ${NS}::server::read_telnet {sock client args} {
 
   # check eof
   if {[eof $sock]} {
-    forget $client
+    forget $client "eof read_telnet"
     return
   }
 
@@ -677,7 +687,7 @@ proc ${NS}::server::read_comm {sock client} {
 
   # check eof
   if {[eof $sock]} {
-    forget $client
+    forget $client "eof read_comm"
     return
   }
 }
@@ -716,7 +726,7 @@ proc ${NS}::server::read_redis {sock client args} {
 
   # check eof
   if {[eof $sock]} {
-    forget $client
+    forget $client "eof redis"
     return
   }
 
@@ -734,8 +744,7 @@ proc ${NS}::server::read_sized {sock client args} {
 
   if {$size eq ""} {
     if {[eof $sock]} {
-      debug "see of"
-      forget $client
+      forget $client "eof read_sized"
       return
     }
     debug "see empty size"
@@ -798,7 +807,11 @@ proc ${NS}::server::read_command {sock client} {
       fileevent $sock readable [list ${ns}::read_telnet $sock $client]
       read_telnet $sock $client $line
       return
+    } elseif {[eof $sock]} {
+      forget $client "eof read_command"
+      return
     } else {
+      puts "debug: see empty response"
       # TODO: not expected
     }
 
