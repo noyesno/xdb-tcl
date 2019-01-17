@@ -13,6 +13,7 @@ namespace eval socket {
 
   proc listen {port accept args} {
     variable parallel
+    variable refcount 0
 
     if {"-tpool" in $args} {
       set init [lindex $args end]
@@ -33,6 +34,9 @@ namespace eval socket {
 
   proc accept {accept init sock client_addr client_port} {
     variable parallel
+    variable refcount
+
+    @debug "socket refcount = $refcount"
 
     switch -- $parallel {
       "thread" {
@@ -42,6 +46,17 @@ namespace eval socket {
         after idle [list [namespace which accept2tpool]  $accept $init $sock $client_addr $client_port]
       }
     }
+  }
+
+  proc preserve {} {
+    variable refcount
+    @debug "socket preserve"
+    incr refcount
+  }
+  proc release {} {
+    variable refcount
+    @debug "socket release"
+    incr refcount -1
   }
 
 
@@ -54,7 +69,8 @@ namespace eval socket {
     append initcmd "\n" $init
 
     # TODO: make -maxworkers configureable
-    set tpool [tpool::create -maxworkers 128 -initcmd $initcmd]
+    @debug "tpool::create -maxworkers 64"
+    set tpool [tpool::create -maxworkers 64 -initcmd $initcmd]
   }
 
   proc accept2tpool {accept init sock client_addr client_port} {
@@ -62,13 +78,16 @@ namespace eval socket {
 
     thread::detach $sock
 
-    set cleanup {
+    set cleanup [subst {
       # Do not exit thread. But may need cleanup.
-    }
+      thread::send -async [thread::id] ::socket::release
+    }]
 
     set script ""
     append script "\n" [list thread::attach $sock]
+    append script "\n" [list thread::send -async [thread::id] ::socket::preserve]
     append script "\n" [list $accept $sock $client_addr $client_port $cleanup]
+    append script "\n" [list thread::send $accept $sock $client_addr $client_port $cleanup]
 
     tpool::post -nowait -detached $tpool $script
   }
@@ -83,7 +102,7 @@ namespace eval socket {
 
     set cleanup {
       try {
-        puts "debug: thread::release = [thread::release]"
+        @debug "thread::release = [thread::release]"
       } on error err {
         puts "thread exit error $err"
       }

@@ -4,72 +4,48 @@ set ::KIT_ROOT [file dir [info script]]
 
 lappend auto_path [file join $KIT_ROOT lib]
 
+
 package require socket
 package require xdb-tcl
+package require retis
 
-proc xdb-tcl::debug {args} {
-  set datetime [clock format [clock seconds]]
-  puts "debug: $datetime [::thread::id] % [join $args]"
+package require Thread
+package require Ttrace
+
+ttrace::eval {
+  proc @debug {args} {
+    set datetime [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]
+    puts "debug: $datetime [::thread::id] % [join $args]"
+  }
 }
 
+#======================================================================#
+# main task                                                            #
+#======================================================================#
 
 namespace eval main {}
 
-#======================================================================#
-# main                                                                 #
-#======================================================================#
+source $KIT_ROOT/main/tclinfo.tcl
+source $KIT_ROOT/main/test.tcl
 
-proc main::listen {port} {
-  socket::listen $port xdb-tcl::server::accept -thread {
+proc main::listen {port args} {
+
+  # set parallel "-thread"
+  # set parallel "-tpool"
+
+  set parallel [lindex $args 0]
+
+  if {$parallel eq ""} {
+    set parallel "-tpool"
+  }
+
+  socket::listen $port retis::server::accept $parallel {
+    package require Ttrace
+
     package require xdb-tcl
-    package require Thread
-
-    proc xdb-tcl::debug {args} {
-      set datetime [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]
-      puts "debug: $datetime [::thread::id] % [join $args]"
-    }
   }
 
   vwait forever
-}
-
-proc main::listen-tpool {port} {
-  socket::listen $port xdb-tcl::server::accept -tpool {
-    package require xdb-tcl
-    package require Thread
-
-    puts "init tpool"
-    proc xdb-tcl::debug {args} {
-      set datetime [clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S"]
-      puts "debug: $datetime [::thread::id] % [join $args]"
-    }
-  }
-
-  vwait forever
-}
-
-proc main::test {args} {
-  package require tcltest
-  ::tcltest::configure -verbose {pass}
-  # ::tcltest::workingDirectory ./run-test
-  # uplevel #0 { namespace import ::tcltest::* }
-
-  lassign $args tclfile
-
-  if [file isfile $tclfile] {
-    uplevel #0 source $tclfile
-  } elseif [file isdir $tclfile] {
-    ::tcltest::configure -testdir $tclfile
-    ::tcltest::runAllTests
-  }
-  exit
-}
-
-proc main::runtime-info {args} {
-  puts "loaded = [info loaded]"
-  puts "tsv::handlers = [tsv::handlers]" 
-  package require Thread
-
 }
 
 proc main::help {} {
@@ -78,6 +54,10 @@ proc main::help {} {
   puts "    [file tail $::argv0] listen \$port"
   puts ""
 }
+
+#======================================================================#
+# main                                                                 #
+#======================================================================#
 
 set ::argv [lassign $::argv act]
 
