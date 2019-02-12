@@ -127,9 +127,12 @@ proc ${NS}::server::cache {act pool args} {
       lassign $args key varname
       upvar $varname value
       set value ""
+
       set found [::tsv::get $pool $key value]
+
       if {!$found} {
-        return $found
+        # Cache Not Found
+        return 0
       }
 
       set value [lindex $value 0]
@@ -137,6 +140,10 @@ proc ${NS}::server::cache {act pool args} {
       set db_mtime 0
       catch {
         set db_mtime [file mtime $pool]
+        set wal_file $pool-wal
+        if [file exist $wal_file] {
+          set db_mtime [expr {max($db_mtime, [file mtime $wal_file])}]
+        }
       }
       if {$db_mtime<=0 || $db_mtime > $mtime} {
         set found 0
