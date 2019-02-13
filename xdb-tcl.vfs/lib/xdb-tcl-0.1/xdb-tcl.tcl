@@ -128,35 +128,53 @@ proc ${NS}::server::cache {act pool args} {
       upvar $varname value
       set value ""
 
-      set found [::tsv::get $pool $key value]
+      set cache_hit [::tsv::get $pool $key cached_value]
 
-      if {!$found} {
-        # Cache Not Found
+      if {!$cache_hit} {
+        # Cache Miss
         return 0
       }
 
-      set value [lindex $value 0]
-      set mtime [lindex $value 1]
-      set db_mtime 0
-      catch {
-        set db_mtime [file mtime $pool]
-        set wal_file $pool-wal
-        if [file exist $wal_file] {
-          set db_mtime [expr {max($db_mtime, [file mtime $wal_file])}]
+      lassign $cached_value value cache_mtime
+
+      # XXX: At least 1 db file exist, and not newer than $cache_mtime
+
+      set cache_expire 1
+
+      try {
+	foreach dbfile [list $pool $pool-wal] {
+	  if [file exist $dbfile] {
+	    set cache_expire 0
+	    set db_mtime [file mtime $dbfile]
+
+            # @debug "query cache check file mtime $db_mtime > $cache_mtime $dbfile"
+            if { $db_mtime > $cache_mtime} {
+              set cache_expire 1
+	      break
+            }
+	  }
+	}
+      } on error err {
+        @debug "query cache check error $err"
+      }
+
+      if {$cache_expire} {
+        # Clear cache entry
+        @debug "query cache clear $key@$cache_mtime from $pool"
+        catch {
+          ::tsv::unset $pool $key
         }
+        return 0
       }
-      if {$db_mtime<=0 || $db_mtime > $mtime} {
-        set found 0
-        set value ""
-      }
-      return $found
+
+      return 1
     }
     "set" {
       lassign $args key value
       set now [clock seconds]
       ::tsv::set $pool $key [list $value $now]
     }
-  }
+  } ;# end switch
 }
 
 proc ${NS}::server::do_db_query {dbcmd sql args} {
@@ -193,7 +211,7 @@ proc ${NS}::server::do_db_query {dbcmd sql args} {
   }
 
   if [cache get $dbfile $cachekey result] {
-    @debug "query result from cache"
+    @debug "query result from cache $dbfile"
     return $result
   } else {
     set result [db_query $dbcmd $kargs(-sql) {*}[array get kargs]]
