@@ -20,5 +20,6 @@ proc ${NS}::session::read_sized {sock client args} {
   set command [read $sock $size]
   gets $sock
   @debug $size $command
+
   execute $client {*}$command
 }

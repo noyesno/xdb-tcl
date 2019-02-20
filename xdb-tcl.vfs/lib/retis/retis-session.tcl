@@ -126,7 +126,7 @@ proc ${NS}::session::reply_result {client body} {
     }
   }
 
-  $client watchdog start
+  # $client watchdog start ;# do this in execute()
   return
 }
 
@@ -136,6 +136,8 @@ proc ${NS}::session::reply_result {client body} {
 
 proc ${NS}::session::reply_error {client body args} {
   set sock [$client sock]
+
+  @debug "reply_error $body"
 
   switch -- [$client get protocol] {
     "sized" {
@@ -172,6 +174,8 @@ proc ${NS}::session::reply_error {client body args} {
       "not supported"
     }
   }
+
+  # $client watchdog start ;# do this in execute()
   return
 }
 
@@ -183,6 +187,8 @@ proc ${NS}::session::read_command {sock client} {
   set ncmd [$client get ncmd]
 
     $client watchdog stop
+
+    # FIXME: if below read command blocking, there will be an issue.
 
     set line [gets $sock]
 
@@ -258,6 +264,8 @@ proc ${NS}::session::execute {client args} {
     ${sns}::$cmd $client {*}$cmd_argv
   } on error err {
     reply_error $client $err $args
+  } finally {
+    $client watchdog start
   }
 }
 
